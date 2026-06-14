@@ -10,29 +10,10 @@
 cpp/                         C++ 图片 demo 和实时摄像头 demo 源码
 run_realtime_yolo_world.sh   鲁班猫 5 实时检测推流启动脚本
 README.md                    当前说明文档
-.gitignore                   忽略模型、runtime、编译产物和本地部署包
+LICENSE                      MIT 许可文件
 ```
 
-GitHub 端只保留上述源码、脚本和说明文件。本地同步仓库与 GitHub 保持一致，不包含 `python/`、`model/`、模型文件、runtime 动态库或编译产物。
-
-## 未上传内容
-
-以下内容需要你在本地或板端自行准备，不会提交到 GitHub：
-
-```text
-*.rknn
-*.onnx
-*.so
-*.a
-python/
-model/
-deploy/
-build/
-install/
-rknn_yolo_world_demo
-rknn_yolo_world_realtime
-todo.md
-```
+GitHub 端只保留上述源码、脚本和说明文件。本地同步仓库与 GitHub 保持一致。
 
 板端运行目录仍然需要保持类似结构：
 
@@ -49,21 +30,53 @@ rknn_yolo_world_demo/
 └── run_realtime_yolo_world.sh
 ```
 
-## 编译方式
+## 编译 C++ Demo
 
-把本仓库内容放回 RKNN Model Zoo 的 `examples/yolo_world/` 目录后，在 `rknn_model_zoo` 根目录执行：
+本仓库只保存 `examples/yolo_world` 这一部分源码，编译时依赖完整的 RKNN Model Zoo 工程。需要先准备：
+
+- RKNN Model Zoo 源码目录，目录下应有 `build-linux.sh`。
+- Linux 交叉编译工具链，并且环境里能直接找到 `aarch64-linux-gnu-gcc` 和 `aarch64-linux-gnu-g++`。
+- RKNN Model Zoo 自带的 RKNN runtime、RGA、include、utils、3rdparty 等依赖目录。
+
+可以先检查交叉编译器：
+
+```sh
+which aarch64-linux-gnu-gcc
+which aarch64-linux-gnu-g++
+```
+
+将本仓库内容放到 RKNN Model Zoo 的 `examples/yolo_world/` 目录，例如：
+
+```text
+rknn_model_zoo/
+├── build-linux.sh
+├── 3rdparty/
+├── examples/
+│   └── yolo_world/
+│       ├── cpp/
+│       ├── run_realtime_yolo_world.sh
+│       ├── README.md
+│       └── LICENSE
+└── ...
+```
+
+然后在 `rknn_model_zoo` 根目录编译 RK3588 aarch64 版本：
 
 ```sh
 ./build-linux.sh -t rk3588 -a aarch64 -d yolo_world
 ```
 
-编译产物会生成到：
+编译完成后，C++ demo 和实时 demo 产物会生成到：
 
 ```text
 install/rk3588_linux_aarch64/rknn_yolo_world_demo/
 ```
 
-本仓库不会上传该 `install/` 目录。
+其中实时检测程序是：
+
+```text
+install/rk3588_linux_aarch64/rknn_yolo_world_demo/rknn_yolo_world_realtime
+```
 
 ## 板端启动
 
