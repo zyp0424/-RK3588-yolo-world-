@@ -19,11 +19,9 @@ GitHub 端只保留上述源码、脚本和说明文件。本地同步仓库与 
 
 已经打包好的板端部署包可通过百度网盘下载：
 
-```text
-文件：deploy.zip
-链接：https://pan.baidu.com/s/1fRD_RSMoV3zHEleIkxwFUA?pwd=Gxbm
-提取码：Gxbm
-```
+- 文件：`deploy.zip`
+- 下载链接：[百度网盘 deploy.zip](https://pan.baidu.com/s/1fRD_RSMoV3zHEleIkxwFUA?pwd=Gxbm)
+- 提取码：`Gxbm`
 
 `deploy.zip` 内包含本项目运行所需的 RKNN 模型、RKNN runtime/RGA 动态库、已编译好的 C++ demo 和运行脚本。下载后解压到鲁班猫 5 / RK3588 板端即可直接使用，不需要在板端重新编译。
 
