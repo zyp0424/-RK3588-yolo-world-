@@ -13,6 +13,8 @@ README.md                    当前说明文档
 .gitignore                   忽略模型、runtime、编译产物和本地部署包
 ```
 
+GitHub 端只保留上述源码、脚本和说明文件。本地同步仓库与 GitHub 保持一致，不包含 `python/`、`model/`、模型文件、runtime 动态库或编译产物。
+
 ## 未上传内容
 
 以下内容需要你在本地或板端自行准备，不会提交到 GitHub：
