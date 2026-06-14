@@ -1,5 +1,9 @@
 # RK3588 YOLO-World 实时检测 C++ Demo
 
+[![基于RK3588的实时摄像头视频流yolo-world检测](assets/bilibili-video-cover.jpg)](https://www.bilibili.com/video/BV14pJP6kEbC/)
+
+[点击观看视频教程：基于RK3588的实时摄像头视频流 yolo-world 检测](https://www.bilibili.com/video/BV14pJP6kEbC/)
+
 这是面向鲁班猫 5 / RK3588 的 YOLO-World 实时摄像头目标检测 C++ 代码和启动脚本。
 
 本仓库只保存源码和脚本，不保存模型、ONNX、runtime 动态库、编译产物和本地部署包。
