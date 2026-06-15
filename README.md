@@ -136,6 +136,99 @@ infer1 -> RKNN_NPU_CORE_1
 infer2 -> RKNN_NPU_CORE_2
 ```
 
+## C++ 实时检测逻辑
+
+实时检测入口是 `cpp/realtime_main.cc`，整体目标是绕开“摄像头保存 JPG、demo 再读取 JPG”的慢路径，直接走内存帧：
+
+```text
+V4L2 摄像头采集 -> NV12 内存帧 -> RGA 预处理 -> RKNN 推理 -> NV12 画框 -> FFmpeg/RKMPP 推流
+```
+
+程序启动后会先读取 `detect_classes.txt`，并用 `clip_text_fp16.rknn` 生成一次文本特征 `text_output`。这个步骤只在启动时执行一次，后续每一帧只运行 `yolo_world_v2s_i8.rknn`，不会每帧重复跑 `clip_text.rknn`。如果修改了 `detect_classes.txt` 里的检测类别，需要重启程序，让文本特征重新生成。
+
+随后程序会为每个 RKNN 推理线程初始化一个独立的 `rknn_context`。默认 3 个推理线程分别绑定 RK3588 的三个 NPU core；如果通过环境变量增加 `WORKERS`，core mask 会按 `0 -> 1 -> 2 -> 0 -> ...` 轮询分配。
+
+## 线程分工
+
+默认脚本启动后，C++ 进程内部线程如下：
+
+| 线程名 | 默认数量 | 作用 |
+| --- | ---: | --- |
+| `rknn_yolo_world` | 1 | 主线程，负责初始化、创建工作线程、等待退出信号 |
+| `cap_v4l2` | 1 | 打开 `/dev/video11`，设置 NV12、1920x1080、60 FPS、8 个 mmap buffer，并持续采集帧 |
+| `pre_rga0~5` | 6 | 使用 RGA 将原始 NV12 帧 resize/letterbox 到 YOLO 输入尺寸，并转成 RGB888 |
+| `infer0~2` | 3 | 每个线程持有独立 `rknn_context`，调用 `rknn_run()` 进行 YOLO-World 推理 |
+| `render_out` | 1 | 丢弃过旧结果，在原始 NV12 帧上画检测框和类别文字，然后写入 FIFO |
+| `stats` | 1 | 每秒打印采集、预处理、推理、推流 FPS、队列占用、丢帧数和延迟 |
+
+脚本还会额外启动一个 FFmpeg 进程，从 FIFO 读取 NV12 原始帧，用 `h264_rkmpp` 编码成 H.264，再通过 UDP 推给 Windows 上位机。
+
+## 队列与低延迟策略
+
+三个线程阶段之间用有界队列连接：
+
+| 队列 | 默认深度 | 连接阶段 | 满队列策略 |
+| --- | ---: | --- | --- |
+| `raw_queue` | 2 | `cap_v4l2 -> pre_rga*` | 满了丢最旧的原始帧 |
+| `infer_queue` | 1 | `pre_rga* -> infer*` | 满了丢最旧的预处理帧 |
+| `result_queue` | 1 | `infer* -> render_out` | 满了丢最旧的推理结果 |
+
+这里选择的是实时优先策略：宁可丢旧帧，也不让旧帧在队列里越排越久。NPU 忙时，`rknn_run()` 会在对应的 `infer*` 线程中等待 NPU 驱动返回，上游采集和 RGA 预处理仍然继续跑；如果推理跟不上采集速度，`infer_queue` 会持续保留较新的帧并丢弃旧帧。
+
+推理线程并行返回时，结果可能乱序。`render_out` 会按帧序号过滤掉比已输出帧更旧的结果，同时按 `STREAM_FPS` 控制写给 FFmpeg 的输出节奏。这样最终看到的是尽量新的检测画面，而不是每一帧都排队检测。
+
+## 流程图
+
+```mermaid
+flowchart TD
+    A[启动 run_realtime_yolo_world.sh] --> B[设置 LD_LIBRARY_PATH]
+    B --> C[创建 NV12 FIFO]
+    C --> D[启动 FFmpeg 进程<br/>读取 FIFO 并用 h264_rkmpp 推流]
+    C --> E[启动 rknn_yolo_world_realtime]
+
+    E --> F[读取 detect_classes.txt]
+    F --> G[clip_text_fp16.rknn 只运行一次<br/>生成 text_output]
+    G --> H[初始化多个 YOLO-World rknn_context]
+    H --> I[按 worker_id % 3 绑定 NPU core]
+
+    I --> J[cap_v4l2<br/>V4L2 mmap 采集 NV12]
+    J --> K{{raw_queue<br/>深度 2<br/>满了丢旧帧}}
+    K --> L[pre_rga0~5<br/>RGA resize/letterbox<br/>NV12 -> RGB888]
+    L --> M{{infer_queue<br/>深度 1<br/>满了丢旧帧}}
+    M --> N[infer0~2<br/>RKNN YOLO-World 推理<br/>输入 RGB + text_output]
+    N --> O{{result_queue<br/>深度 1<br/>满了丢旧结果}}
+    O --> P[render_out<br/>过滤乱序/过旧结果<br/>在 NV12 原图画框]
+    P --> Q[写入 FIFO]
+    Q --> D
+    D --> R[UDP MPEG-TS 推流]
+    R --> S[Windows ffplay 接收观看]
+
+    K -.队列长度和丢帧.-> T[stats 每秒打印]
+    M -.队列长度和丢帧.-> T
+    O -.队列长度和丢帧.-> T
+    P -.age_ms / stream FPS.-> T
+```
+
+## 性能观察方法
+
+程序运行时会每秒输出类似：
+
+```text
+[stats] fps cap=60 pre=60 infer=38 stream=28 | age_ms=98 | queue raw=0/2 infer=1/1 result=0/1 | drops raw=0(+0) infer=1450(+23) result=11(+0) stale=818(+9) | errors cap=0 pre=0 infer=0 out=0
+```
+
+其中 `cap/pre/infer/stream` 分别表示采集、预处理、推理、写入 FFmpeg 的实时 FPS；`age_ms` 表示当前输出检测画面距离摄像头采集时间的板端延迟；`drops` 和 `stale` 越高，说明系统正在主动丢弃旧帧或旧结果以保持低延迟。
+
+默认 3 推理线程在前面测试中的典型现象：
+
+```text
+采集：约 60 FPS
+预处理：约 60 FPS
+RKNN 推理：约 37~39 FPS
+实际检测画面输出：约 25~28 FPS
+板端检测延迟 age_ms：约 80~108 ms
+```
+
 ## Windows 接收端
 
 上位机 Windows 可使用：
@@ -151,23 +244,6 @@ ffplay -hide_banner -loglevel info `
   -analyzeduration 0 `
   -f mpegts `
   -i "udp://0.0.0.0:1235?overrun_nonfatal=1&fifo_size=32768"
-```
-
-## 实时策略
-
-- `clip_text.rknn` 只在程序启动时运行一次，生成文本特征后复用。
-- 视频帧流程是 `V4L2 -> NV12 内存帧 -> RGA resize/letterbox -> RKNN -> NV12 画框 -> FFmpeg/RKMPP 推流`。
-- 队列是低延迟优先，满了丢旧帧，不保证每一帧都检测。
-- 统计日志每秒输出 `cap/pre/infer/stream` FPS、`age_ms`、队列占用、丢帧数和错误数。
-
-3 推理线程实测现象：
-
-```text
-采集：约 60 FPS
-预处理：约 60 FPS
-RKNN 推理：约 37~39 FPS
-实际检测画面输出：约 25~28 FPS
-板端检测延迟 age_ms：约 80~108 ms
 ```
 
 ## 许可
