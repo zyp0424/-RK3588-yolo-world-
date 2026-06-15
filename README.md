@@ -19,6 +19,49 @@ LICENSE                      MIT 许可文件
 
 GitHub 端只保留上述源码、脚本和说明文件。本地同步仓库与 GitHub 保持一致。
 
+## cpp 目录文件说明
+
+`cpp/` 目录是 RKNN Model Zoo 原 YOLO-World C++ demo 的基础上新增实时摄像头检测逻辑后的源码目录。各文件作用如下：
+
+```text
+cpp/
+├── CMakeLists.txt
+│   └── 定义 C++ demo 的编译规则；会编译图片检测 demo `rknn_yolo_world_demo`
+│       和实时摄像头 demo `rknn_yolo_world_realtime`。
+├── main.cc
+│   └── 原始图片检测入口；读取图片文件，执行 YOLO-World 推理并输出检测结果。
+├── realtime_main.cc
+│   └── 实时摄像头检测入口；负责 V4L2 采集、RGA 预处理、多线程 RKNN 推理、
+│       NV12 画框、写 FIFO 给 FFmpeg 推流以及运行状态统计。
+├── postprocess.cc
+│   └── YOLO-World 输出后处理；完成置信度过滤、NMS、框坐标还原、类别名映射。
+├── postprocess.h
+│   └── 后处理数据结构和接口声明，例如检测框、置信度、类别 id、阈值等。
+├── rknpu2/
+│   ├── clip_text/
+│   │   ├── clip_text.cc
+│   │   │   └── `clip_text_fp16.rknn` 的初始化、输入设置、推理和输出读取。
+│   │   │       启动时读取 `detect_classes.txt`，调用 tokenizer 得到 token id，
+│   │   │       再生成后续 YOLO-World 每帧复用的 `text_output`。
+│   │   └── clip_text.h
+│   │       └── clip text RKNN 上下文和接口声明。
+│   └── yolo_world/
+│       ├── yolo_world.cc
+│       │   └── `yolo_world_v2s_i8.rknn` 的初始化、输入设置、推理和释放。
+│       └── yolo_world.h
+│           └── YOLO-World RKNN 上下文和接口声明。
+└── tokenizer/
+    ├── clip_tokenizer.cpp
+    │   └── CLIP tokenizer 实现；把类别文本切分并编码成 `clip_text.rknn`
+    │       需要的 token id 序列。
+    ├── clip_tokenizer.h
+    │   └── tokenizer 接口声明，包含 BOS/EOS/PAD token id 和 BPE 编码接口。
+    └── clip_vocab.h
+        └── 内置 CLIP tokenizer 词表/BPE 数据，供 `clip_tokenizer.cpp` 使用。
+```
+
+`tokenizer/` 的作用只发生在启动阶段：它把 `detect_classes.txt` 里的文本类别转换成 `clip_text_fp16.rknn` 能接收的 token id。`clip_text_fp16.rknn` 再把这些 token id 转成文本特征 `text_output`。实时检测过程中，每一帧只复用这份 `text_output` 跑 `yolo_world_v2s_i8.rknn`，不会每帧重复执行 tokenizer 或 `clip_text_fp16.rknn`。
+
 ## 部署包下载
 
 已经打包好的板端部署包可通过百度网盘下载：
