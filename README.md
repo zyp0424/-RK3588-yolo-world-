@@ -87,6 +87,47 @@ rknn_yolo_world_demo/
 └── run_realtime_yolo_world.sh
 ```
 
+## 自己转换模型或二次开发
+
+如果只是想直接跑通我这个实时检测流程，优先使用上面的 `deploy.zip`。它已经包含 RKNN 模型、runtime 动态库、编译好的 C++ demo 和启动脚本，解压到鲁班猫 5 / RK3588 后按本文的启动方式运行即可。
+
+如果想自己体验 ONNX 到 RKNN 的转换流程，或者基于这个项目实现自己的独特 demo 流程，需要另外准备 Rockchip 官方工具链和完整工程。常见本地目录大致会类似：
+
+```text
+.venv-rknn/        Python 虚拟环境，用于安装和运行 RKNN-Toolkit2
+rknn-toolkit2/     RKNN 模型转换、量化、导出工具
+rknn_model_zoo/    官方 demo、C++ 编译脚本、runtime、RGA、utils 等工程依赖
+```
+
+官方入口：
+
+- [RKNN-Toolkit2 官方仓库](https://github.com/airockchip/rknn-toolkit2)：用于在 PC 端将 ONNX 等模型转换为 RKNN，也负责量化、混合量化、模型导出等流程。
+- [RKNN Model Zoo 官方仓库](https://github.com/airockchip/rknn_model_zoo)：包含各类 RKNN demo、C++ 示例、交叉编译脚本和示例工程结构。
+- [rknpu2 runtime / driver 相关目录](https://github.com/airockchip/rknn-toolkit2/tree/master/rknpu2)：包含 RKNN runtime、include、板端库等相关内容。
+
+具体模型转换命令、量化配置、环境安装方式和不同模型的适配细节，建议以官方仓库 README 和文档为准。这个仓库只保留 YOLO-World 实时摄像头 demo 的 C++ 源码和启动脚本，不包含完整的模型转换环境。
+
+如果使用我网盘里的部署包，但想适配自己的摄像头或网络环境，建议优先修改 C++ 实时 demo 和启动脚本里的这些参数：
+
+- 摄像头接口：例如 `/dev/video11` 是否需要改成自己的设备节点。
+- 采集参数：例如 V4L2 输入分辨率、帧率、mmap buffer 数量、是否需要打开或关闭摄像头时域降噪。
+- RGA 预处理参数：例如输入尺寸变化后是否仍能稳定转换到模型输入尺寸。
+- 推流参数：例如推流分辨率、推流 FPS、码率、GOP、UDP 目标地址和端口。
+- 推理线程数：根据实际延迟、NPU 占用率和输出 FPS 调整 `WORKERS`。
+
+修改源码后仍然需要在完整 `rknn_model_zoo` 工程下重新编译，并保证环境里能找到：
+
+```sh
+aarch64-linux-gnu-gcc
+aarch64-linux-gnu-g++
+```
+
+编译命令仍然是：
+
+```sh
+./build-linux.sh -t rk3588 -a aarch64 -d yolo_world
+```
+
 ## 编译 C++ Demo
 
 本仓库只保存 `examples/yolo_world` 这一部分源码，编译时依赖完整的 RKNN Model Zoo 工程。需要先准备：
@@ -271,6 +312,31 @@ RKNN 推理：约 37~39 FPS
 实际检测画面输出：约 25~28 FPS
 板端检测延迟 age_ms：约 80~108 ms
 ```
+
+## 推理线程数对性能的影响
+
+RK3588 有 3 个 NPU core，但“推理线程越多”不等于“端到端越快”。每个推理线程都会持有一个独立的 `rknn_context` 并提交 `rknn_run()`，线程数过多时会让 NPU 队列更拥挤，结果返回更容易乱序，渲染线程也会丢弃更多旧结果。最终表现是 NPU 占用率上去了，但画面延迟也上去了。
+
+前面在鲁班猫 5 / RK3588 上观察到的典型结果如下：
+
+| RKNN 推理线程数 | RKNN 推理 FPS | 最终检测画面输出 FPS | `age_ms` 板端延迟 | NPU 占用现象 | 现象说明 |
+| ---: | ---: | ---: | ---: | --- | --- |
+| 12 | 约 48 FPS | 约 24~31 FPS | 约 222~281 ms | 三个 NPU core 约 98% | NPU 基本满载，但队列拥挤，旧结果明显增多 |
+| 9 | 约 47~49 FPS | 约 25~33 FPS | 约 177~233 ms | 接近满载，常见约 98% | 推理 FPS 接近 12 线程，但延迟仍偏高 |
+| 6 | 约 46~47 FPS | 约 25~33 FPS | 约 127~158 ms | 高占用，明显高于 3 线程 | 推理 FPS 没明显下降，延迟比 9/12 线程低 |
+| 3 | 约 37~39 FPS | 约 25~28 FPS | 约 80~108 ms | 三个 NPU core 约 70% 左右 | 推理 FPS 下降，但端到端延迟最低，实时观感更好 |
+
+这里的关键取舍是：如果目标是压榨 NPU 占用率，可以增加推理线程，让三个 NPU core 接近 98% 占用；如果目标是实时视频低延迟，过多推理线程反而会造成 `infer_queue`、NPU 内部任务和 `result_queue` 的拥挤，最后渲染线程会过滤掉大量旧结果。
+
+`render_out` 线程的逻辑是只输出“更新、更合适的检测结果”：如果某个推理结果的帧序号比已经输出过的帧更旧，它会被当作 stale result 丢弃；如果输出间隔小于 `STREAM_FPS` 对应的时间间隔，也会跳过该结果。因此，最终推给 FFmpeg 的检测画面 FPS 不一定等于 RKNN 推理 FPS，而是由以下因素共同决定：
+
+- RKNN 推理结果返回速度。
+- 结果是否乱序或过旧。
+- `STREAM_FPS` 的限速。
+- `render_out` 画框和写 FIFO 的速度。
+- FFmpeg/RKMPP 编码和 UDP 推流是否跟得上。
+
+因此本项目默认保留 `WORKERS=3`，优先保证低延迟；如果你更重视检测结果密度，可以自行把 `WORKERS` 调到 6、9 或 12，再结合 `age_ms`、`stream` FPS、`stale` 数量和 NPU 占用率决定最终配置。
 
 ## Windows 接收端
 
